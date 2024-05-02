@@ -1,0 +1,197 @@
+---
+title: "Carmen Data"
+mainfont: Verdana
+sansfont: Georgia
+toc: true
+geometry:
+  - top=30mm
+  - left=1in
+  - right=1in
+  - heightrounded
+format: 
+  html:
+    embed-resources: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(RColorBrewer)
+library(scales)
+library(wisconsink12)
+library(cityforwardcollective)
+library(ggiraph)
+library(glue)
+library(reactable)
+
+showtext::showtext_auto()
+
+tt_css <- glue("text-align:center;",
+               "background-color:{cfc_darkblue};",
+               "color:white;",
+               "padding: 5pt;")
+
+mke_rc <- make_mke_rc()
+
+these_schools <- c(
+  "3619_0407", # Carmen hs south
+  "3619_0451", # Carmen hs southeast
+  "3619_0026", # Pulaski
+  "3619_0162" # ALBA
+)
+
+
+this_e <- enrollment |> 
+  filter(dpi_true_id %in% these_schools &
+           str_detect(group_by, regex("grade", ignore_case = TRUE))) |> 
+  select(-group_by) |> 
+  left_join(schools |> 
+              filter(school_year == "2023-24") |> 
+              select(dpi_true_id, school_name)) |> 
+  mutate(group_by_value = factor(group_by_value,
+                                 levels = c(
+                                   "K3",
+                                   "K4",
+                                   "KG",
+                                   seq(1:12)
+                                 )))
+
+sum_e <- this_e |> 
+  group_by(school_year, dpi_true_id) |> 
+  summarise(total = sum(student_count))
+
+star <- "\u2605"
+
+this_rating <- mke_rc |> 
+  filter(school_year > "2019-20" &
+           dpi_true_id %in% these_schools) |> 
+  select(school_year, 
+         dpi_true_id,
+         school_name,
+         score_ach = sch_ach,
+         score_growth = sch_growth,
+         score_tgo = sch_tgo,
+         score_ot = sch_ot,
+         weight_ach = ach_weight,
+         weight_growth = growth_weight,
+         weight_tgo = tgo_weight,
+         weight_ot = ot_weight) |> 
+  pivot_longer(cols = 4:11, names_to = c(".value", "pa"), names_sep = "_") |> 
+  group_by(school_year, dpi_true_id, school_name,
+           ag = pa %in% c("ach", "growth")) |> 
+  mutate(group_weight = sum(weight)) |> 
+  ungroup() |> 
+  group_by(school_year, dpi_true_id, school_name) |> 
+  mutate(new_weight = ifelse(pa %in% c("ach", "growth") & !is.na(weight),
+                         round(group_weight / 2, digits = 3), weight)) |> 
+  summarise(overall_score = weighted.mean(score, new_weight) |> 
+              round(digits = 1)) |> 
+  left_join(mke_rc |> 
+              select(dpi_true_id,
+                     school_year,
+                     actual_oa = overall_score)) |>
+  pivot_longer(cols = 4:5, names_to = "score") |> 
+  mutate(stars = case_when(
+    value >= 83.0 ~ paste0(rep(star, 5), collapse = ""),
+    value >= 70.0 ~ paste0(rep(star, 4), collapse = ""),
+    value >= 58.0 ~ paste0(rep(star, 3), collapse = ""),
+    value >= 48.0 ~ paste0(rep(star, 2), collapse = ""),
+    value >= 0 ~ paste0(rep(star, 1), collapse = ""),
+    TRUE ~ ""
+  ))
+
+
+```
+
+## Enrollment
+
+```{r}
+# p <- this_e |> 
+#   ggplot(aes(school_year, student_count)) +
+#   geom_col_interactive(aes(fill = group_by_value,
+#                            tooltip = "group_by_value")) +
+#   scale_fill_viridis_d() +
+#   facet_wrap(~school_name) +
+#   labs(fill = "Grade") +
+#   theme(legend.position = "bottom")
+# 
+# girafe(ggobj = p)
+
+these_p <- map(these_schools, function(dti) {
+  td <- this_e |> 
+    filter(dpi_true_id == dti) |> 
+    mutate(id = row_number())
+  
+  p <- td |> 
+    ggplot(aes(school_year, student_count,
+               data_id = id)) +
+    geom_col_interactive(aes(fill = group_by_value,
+                             tooltip = glue("Grade {group_by_value}\n",
+                                            "Enr. {student_count}")),
+                         drop = FALSE) +
+    scale_fill_viridis_d(drop = FALSE) +
+    labs(title = str_wrap(td$school_name, 60),
+         fill = "Grade", x = "", y = "Student Count") +
+    theme(axis.text.x = element_text(size = 10),
+          plot.title = element_text(size = 16))
+  
+  girafe(ggobj = p, options = list(opts_hover(css = "fill-opacity:.25;stroke:black"),
+                                   opts_tooltip(css = tt_css, 
+                                                opacity = .8,
+                                                offx = -75, offy = -72)))
+})
+
+these_p[[1]]
+these_p[[2]]
+these_p[[3]]
+these_p[[4]]
+```
+
+## Outcomes
+
+```{r}
+these_r <- map(these_schools, function(dti) {
+  td <- this_rating |> 
+    filter(dpi_true_id == dti & !is.na(value)) |> 
+    ungroup() |> 
+    mutate(id = row_number())
+  
+  p <- td |> 
+  mutate(score = ifelse(score == "actual_oa", "Actual Score", "CFC Score")) |> 
+  ggplot(aes(school_year, 
+             value, 
+             color = ifelse(score == "CFC Score", cfc_darkblue, "grey80"),
+             data_id = id,)) +
+  geom_point_interactive(size = 5, aes(data_id = id,
+                                       tooltip = glue("{score}: {value}\n",
+                                                      "{stars}"))) +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_color_identity() +
+  labs(title = str_wrap(td$school_name, 60),
+       fill = "Grade", x = "", y = "Score") +
+  theme(axis.text.x = element_text(size = 10),
+        plot.title = element_text(size = 16)) 
+  
+  girafe(ggobj = p, options = list(opts_hover(css = "fill-opacity:.25;stroke:black"),
+                                   opts_tooltip(css = tt_css, 
+                                                opacity = .8,
+                                                offx = -75, offy = -72)))
+})
+
+these_r[[1]]
+these_r[[2]]
+these_r[[3]]
+these_r[[4]]
+```
+
+## Data Table
+
+```{r}
+this_rating |> 
+  filter(!is.na(value) & score == "overall_score") |> 
+  left_join(sum_e) |> 
+  reactable(pagination = FALSE, 
+            defaultColDef = colDef(headerStyle = list(fontSize = 12),
+                                   style = "font-size:10pt;"))
+```
